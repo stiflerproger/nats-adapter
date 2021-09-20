@@ -1,4 +1,19 @@
-import {connect, ConnectionOptions, createInbox, NatsConnection, StringCodec, Subscription} from "nats";
+import {
+  connect,
+  ConnectionOptions,
+  createInbox,
+  ErrorCode,
+  headers,
+  NatsConnection,
+  StringCodec,
+  Subscription
+} from "nats";
+
+interface MessageOptions {
+  isError?: boolean;
+  noReply?: boolean;
+  timeout?: number;
+}
 
 export default class NatsAdapter {
 
@@ -8,7 +23,7 @@ export default class NatsAdapter {
   #sc = StringCodec();
 
   public async connect(connection: ConnectionOptions) {
-    if (this.nats) throw 'Connection was already created';
+    if (this.nats && !this.nats.isClosed()) throw 'Connection was already created';
 
     this.nats = await connect(connection);
   }
@@ -17,61 +32,46 @@ export default class NatsAdapter {
     if (this.nats && !this.nats.isClosed()) await this.nats.close();
   }
 
-  public send(pattern: string, data: any, options: any) {
+  public send(pattern: string, data: Record<string, unknown>, options?: MessageOptions) {
 
     return new Promise((resolve, reject) => {
+      if (!this.nats || this.nats.isClosed()) throw 'Connection closed';
 
-      try {
+      const inbox = createInbox();
 
-        const inbox = createInbox();
+      const encodedData = this.#sc.encode(JSON.stringify(data));
 
-        const encodedData = this.#sc.encode(JSON.stringify(data));
+      if (!options?.noReply) {
+        // нужно ожидать ответа от сервера
+        this.nats.subscribe(inbox, {
+          max: 1,
+          callback: (err, msg) => {
+            if (err || msg.headers?.hasError) return reject(err || this.#sc.decode(msg.data));
 
-        let timeout: NodeJS.Timeout;
-        let replyHandler: Subscription;
-
-        if (!options?.noReply) {
-          replyHandler = this.nats.subscribe(inbox, {
-            max: 1,
-            callback: (err, m) => {
-              clearTimeout(timeout);
-
-              if (err) {
-                return reject(err);
-              }
-
-              return resolve(JSON.parse(this.#sc.decode(m.data)));
-            }
-          });
-        }
-
-        this.nats.publish(pattern, encodedData, {
-          reply: inbox,
+            return resolve(this.#sc.decode(msg.data));
+          },
+          ...(options?.timeout && {timeout: Number(options.timeout)})
         });
-
-        if (!options?.noReply && typeof options?.timeout === 'number') {
-
-          timeout = setTimeout(() => {
-
-            if (replyHandler) replyHandler.unsubscribe();
-
-            return reject(new Error('Timeout has occurred'));
-
-          }, options.timeout);
-
-        }
-
-      } catch (e) {
-
-        return reject(e);
-
       }
 
-    })
+      const head = headers();
+
+      if (options?.isError) head.append('code', ErrorCode.Unknown);
+
+      this.nats.publish(pattern, encodedData, {
+        ...(options?.noReply && {reply: inbox}),
+        headers: head
+      });
+
+      // если не дожидаемся ответа то сразу завершаем промис
+      if (options?.noReply) return resolve(null);
+
+    }).catch(e => Promise.reject(JSON.stringify((e))))
 
   }
 
   public subscribe(pattern: string, callback: (data: any) => Promise<any>) {
+    if (!this.nats || this.nats.isClosed()) throw 'Connection closed';
 
     if (typeof callback !== 'function') throw 'callback must be an function';
 
@@ -80,16 +80,16 @@ export default class NatsAdapter {
     (async (sub: Subscription) => {
 
       for await (const m of sub) {
-        callback( JSON.parse(this.#sc.decode(m.data)).data )
+        callback(JSON.parse(this.#sc.decode(m.data)).data)
           .then((res: any) => {
-            if (m.reply) this.send(m.reply, res, {noReply: true})
+            if (m.reply) this.send(m.reply, res, {noReply: true}).catch(console.error)
           })
-          .catch(e => {
-            if (m.reply) this.send(m.reply, e, {noReply: true})
+          .catch(err => {
+            if (m.reply) this.send(m.reply, err, {noReply: true, isError: true}).catch(console.error)
           })
       }
 
-    })(sub).then(_ => {});
+    })(sub);
 
   }
 

@@ -30,7 +30,7 @@ class NatsAdapter {
     }
     connect(connection) {
         return __awaiter(this, void 0, void 0, function* () {
-            if (this.nats)
+            if (this.nats && !this.nats.isClosed())
                 throw 'Connection was already created';
             this.nats = yield (0, nats_1.connect)(connection);
         });
@@ -43,40 +43,31 @@ class NatsAdapter {
     }
     send(pattern, data, options) {
         return new Promise((resolve, reject) => {
-            try {
-                const inbox = (0, nats_1.createInbox)();
-                const encodedData = __classPrivateFieldGet(this, _NatsAdapter_sc, "f").encode(JSON.stringify(data));
-                let timeout;
-                let replyHandler;
-                if (!(options === null || options === void 0 ? void 0 : options.noReply)) {
-                    replyHandler = this.nats.subscribe(inbox, {
-                        max: 1,
-                        callback: (err, m) => {
-                            clearTimeout(timeout);
-                            if (err) {
-                                return reject(err);
-                            }
-                            return resolve(JSON.parse(__classPrivateFieldGet(this, _NatsAdapter_sc, "f").decode(m.data)));
-                        }
-                    });
-                }
-                this.nats.publish(pattern, encodedData, {
-                    reply: inbox,
-                });
-                if (!(options === null || options === void 0 ? void 0 : options.noReply) && typeof (options === null || options === void 0 ? void 0 : options.timeout) === 'number') {
-                    timeout = setTimeout(() => {
-                        if (replyHandler)
-                            replyHandler.unsubscribe();
-                        return reject(new Error('Timeout has occurred'));
-                    }, options.timeout);
-                }
+            if (!this.nats || this.nats.isClosed())
+                throw 'Connection closed';
+            const inbox = (0, nats_1.createInbox)();
+            const encodedData = __classPrivateFieldGet(this, _NatsAdapter_sc, "f").encode(JSON.stringify(data));
+            if (!(options === null || options === void 0 ? void 0 : options.noReply)) {
+                // нужно ожидать ответа от сервера
+                this.nats.subscribe(inbox, Object.assign({ max: 1, callback: (err, msg) => {
+                        var _a;
+                        if (err || ((_a = msg.headers) === null || _a === void 0 ? void 0 : _a.hasError))
+                            return reject(err || __classPrivateFieldGet(this, _NatsAdapter_sc, "f").decode(msg.data));
+                        return resolve(__classPrivateFieldGet(this, _NatsAdapter_sc, "f").decode(msg.data));
+                    } }, ((options === null || options === void 0 ? void 0 : options.timeout) && { timeout: Number(options.timeout) })));
             }
-            catch (e) {
-                return reject(e);
-            }
-        });
+            const head = (0, nats_1.headers)();
+            if (options === null || options === void 0 ? void 0 : options.isError)
+                head.append('code', nats_1.ErrorCode.Unknown);
+            this.nats.publish(pattern, encodedData, Object.assign(Object.assign({}, ((options === null || options === void 0 ? void 0 : options.noReply) && { reply: inbox })), { headers: head }));
+            // если не дожидаемся ответа то сразу завершаем промис
+            if (options === null || options === void 0 ? void 0 : options.noReply)
+                return resolve(null);
+        }).catch(e => Promise.reject(JSON.stringify((e))));
     }
     subscribe(pattern, callback) {
+        if (!this.nats || this.nats.isClosed())
+            throw 'Connection closed';
         if (typeof callback !== 'function')
             throw 'callback must be an function';
         const sub = this.nats.subscribe(pattern);
@@ -88,11 +79,11 @@ class NatsAdapter {
                     callback(JSON.parse(__classPrivateFieldGet(this, _NatsAdapter_sc, "f").decode(m.data)).data)
                         .then((res) => {
                         if (m.reply)
-                            this.send(m.reply, res, { noReply: true });
+                            this.send(m.reply, res, { noReply: true }).catch(console.error);
                     })
-                        .catch(e => {
+                        .catch(err => {
                         if (m.reply)
-                            this.send(m.reply, e, { noReply: true });
+                            this.send(m.reply, err, { noReply: true, isError: true }).catch(console.error);
                     });
                 }
             }
@@ -103,7 +94,7 @@ class NatsAdapter {
                 }
                 finally { if (e_1) throw e_1.error; }
             }
-        }); })(sub).then(_ => { });
+        }); })(sub);
     }
 }
 exports.default = NatsAdapter;
