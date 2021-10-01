@@ -5,12 +5,12 @@ interface MessageOptions {
     timeout?: number;
 }
 export default class NatsAdapter {
-    #private;
     /** Native NATS connection */
     nats: NatsConnection;
+    private sc;
     connect(connection: ConnectionOptions): Promise<void>;
     close(): Promise<void>;
-    send(pattern: string, data: Record<string, unknown>, options?: MessageOptions): Promise<unknown>;
+    send(pattern: string, data: string | Record<string, unknown>, options?: MessageOptions): Promise<unknown>;
     subscribe(pattern: string, callback: (data: any) => Promise<any>): void;
 }
 export { NatsAdapter };
